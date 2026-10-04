@@ -9,11 +9,13 @@ import soundfile as sf
 from vosk import Model, KaldiRecognizer, SetLogLevel
 
 # ── Настройки ──────────────────────────────────────────────
-# Маленькая модель (~40 MB, быстро, decent качество)
+# Папка, куда нужно просто скидывать голосовые сообщения
+INPUT_DIR = Path(__file__).parent / "voices"
+
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"
 MODEL_NAME = "vosk-model-small-ru-0.22"
 
-# Большая (~1.8 GB, точнее) — раскомментируй:
+# Большая модель (~1.8 GB, точнее) — раскомментируй при необходимости:
 # MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip"
 # MODEL_NAME = "vosk-model-ru-0.42"
 
@@ -29,13 +31,11 @@ def ensure_model() -> str:
     model_path = MODEL_DIR / MODEL_NAME
     zip_path = MODEL_DIR / "model.zip"
     
-    # Если модель уже распакована — используем её
     if model_path.exists():
         return str(model_path)
 
     MODEL_DIR.mkdir(exist_ok=True)
 
-    # Если zip уже есть, но не распакован — распаковываем
     if zip_path.exists():
         print(f"📂 Распаковываю существующий архив...")
         with zipfile.ZipFile(zip_path) as z:
@@ -44,7 +44,6 @@ def ensure_model() -> str:
         print("✅ Модель готова!\n")
         return str(model_path)
 
-    # Иначе скачиваем
     print(f"📦 Модель не найдена. Скачиваю (~40 MB)...")
     resp = requests.get(MODEL_URL, stream=True)
     resp.raise_for_status()
@@ -67,12 +66,12 @@ def ensure_model() -> str:
     print("✅ Модель готова!\n")
     return str(model_path)
 
+
 # ── Конвертация ────────────────────────────────────────────
 def ogg_to_wav(ogg_path: str) -> str:
     """Telegram .ogg (Opus) → 16 kHz mono WAV для Vosk."""
     audio, sr = sf.read(ogg_path, dtype='int16')
     
-    # Ресемплинг до 16 kHz если нужно
     if sr != SAMPLE_RATE:
         import numpy as np
         duration = len(audio) / sr
@@ -83,7 +82,6 @@ def ogg_to_wav(ogg_path: str) -> str:
             audio
         ).astype('int16')
     
-    # Если стерео — делаем моно
     if audio.ndim > 1:
         audio = audio.mean(axis=1).astype('int16')
     
@@ -128,17 +126,86 @@ def transcribe(audio_path: str) -> str:
             Path(wav_path).unlink()
 
 
-# ── CLI ────────────────────────────────────────────────────
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Использование:  python transcribe.py <файл.ogg>")
-        sys.exit(1)
+# ── Вспомогательные функции ────────────────────────────────
+def get_target_files(limit: int = None) -> list[Path]:
+    """Возвращает список .ogg файлов из папки voices, отсортированных по имени."""
+    INPUT_DIR.mkdir(exist_ok=True)
+    files = list(INPUT_DIR.glob("*.ogg"))
+    
+    if not files:
+        return []
+    
+    # Сортировка по имени (для audio_YYYY-MM-DD_HH-MM-SS.ogg это хронологический порядок)
+    files.sort(key=lambda p: p.name)
+    
+    if limit is not None:
+        return files[-limit:]  # Берем последние N файлов
+    
+    return files
 
-    path = sys.argv[1]
-    if not Path(path).exists():
-        print(f"❌ Файл не найден: {path}")
-        sys.exit(1)
 
+def process_single_file(file_path: Path):
+    """Обрабатывает один файл: транскрибирует и выводит результат в консоль."""
+    print("-" * 60)
+    print(f"📄 Файл: {file_path.name}")
+    
     print("🎧 Распознаю...")
-    text = transcribe(path)
-    print(f"\n📝 Результат:\n{text}" if text else "\n🤷 Речь не распознана.")
+    text = transcribe(str(file_path))
+    
+    print(f"📝 Результат:\n{text if text else '🤷 Речь не распознана.'}\n")
+
+
+# ── CLI (Командная строка) ─────────────────────────────────
+if __name__ == "__main__":
+    # Сразу проверяем модель, чтобы не прерывать процесс скачиванием посередине
+    print("🔄 Проверка модели...")
+    ensure_model()
+
+    if len(sys.argv) == 1:
+        # Режим 1: Обработать ВСЕ файлы в папке voices
+        files = get_target_files()
+        if not files:
+            print(f"📁 Папка '{INPUT_DIR}' пуста или не содержит .ogg файлов.")
+            print("💡 Скопируйте голосовые сообщения в эту папку и запустите скрипт снова.")
+            sys.exit(0)
+        
+        print(f"🎯 Найдено файлов: {len(files)}. Начинаю обработку по очереди...\n")
+        for f in files:
+            process_single_file(f)
+
+    elif len(sys.argv) == 2:
+        arg = sys.argv[1]
+        
+        if arg.isdigit():
+            # Режим 2: Обработать последние N файлов
+            limit = int(arg)
+            files = get_target_files(limit=limit)
+            if not files:
+                print(f"📁 В папке '{INPUT_DIR}' нет файлов для обработки.")
+                sys.exit(0)
+            
+            print(f"🎯 Обрабатываю последние {limit} файл(ов)...\n")
+            for f in files:
+                process_single_file(f)
+        else:
+            # Режим 3: Обработать конкретный файл по имени или пути
+            target_path = Path(arg)
+            
+            # Если файла нет в текущей папке, проверяем папку voices
+            if not target_path.exists():
+                alt_path = INPUT_DIR / arg
+                if alt_path.exists():
+                    target_path = alt_path
+                else:
+                    print(f"❌ Файл не найден: {arg}")
+                    sys.exit(1)
+            
+            process_single_file(target_path)
+
+    else:
+        print("⚠️ Неверный формат команды.")
+        print("\n📘 Использование:")
+        print("  python transcribe.py          # обработать все .ogg в папке 'voices'")
+        print("  python transcribe.py N        # обработать последние N файлов в папке 'voices'")
+        print("  python transcribe.py file.ogg # обработать конкретный файл (из текущей папки или 'voices')")
+        sys.exit(1)

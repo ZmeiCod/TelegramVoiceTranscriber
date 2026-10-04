@@ -1,6 +1,7 @@
 .env
 /.venv
 /model
+/voices
 /__pycache__
 bot.py
 test_proxy.py
